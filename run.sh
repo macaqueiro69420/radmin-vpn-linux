@@ -69,7 +69,7 @@ if [ ! -f "$RADMIN/RvControlSvc.exe" ]; then
     echo "[*] Running installer..."
     WINEDEBUG=-all wine "$INSTALLER" /VERYSILENT /NORESTART 2>/dev/null || true
     echo "[*] Waiting for installer to finish..."
-    for i in $(seq 1 30); do
+    for _ in $(seq 1 30); do
         sleep 2
         [ -f "$RADMIN/RvControlSvc.exe" ] && break
     done
@@ -125,7 +125,7 @@ sleep 0.3
 rm -f /tmp/rvpn_b2d /tmp/rvpn_d2b
 "$BUILD_DIR/tap_bridge" > /tmp/radmin_bridge.log 2>&1 &
 BRIDGE_PID=$!
-for i in $(seq 1 10); do
+for _ in $(seq 1 10); do
     [ -p /tmp/rvpn_b2d ] && [ -p /tmp/rvpn_d2b ] && break
     sleep 0.2
 done
@@ -193,7 +193,7 @@ WINEDEBUG=-all wine rvpn_launcher.exe /run > /tmp/radmin_service.log 2>&1 &
 
 # 11. Wait for service ready + extract VPN IP
 echo "[*] Waiting for service ready..."
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
     sleep 1
     if [ -f "$LOG" ]; then
         vpn_ip=$(python3 -c "
