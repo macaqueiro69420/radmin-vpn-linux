@@ -585,6 +585,7 @@ static NTSTATUS NTAPI DispatchClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 /* IOCTL codes */
 #define IOCTL_RVPN_VERSION  0x0022c004
 #define IOCTL_RVPN_STATUS   0x00224018
+#define IOCTL_RVPN_READY    0x00224020
 #define IOCTL_RVPN_SETUP    0x0022801c
 #define IOCTL_RVPN_PEERMAC  0x00228014
 
@@ -601,10 +602,14 @@ static NTSTATUS NTAPI DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Ir
     PDEVICE_EXTENSION dext = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
     InterlockedIncrement(&dext->IoctlCount);
 
-    if (ioctl == IOCTL_RVPN_STATUS) {
+    if (ioctl == IOCTL_RVPN_STATUS || ioctl == IOCTL_RVPN_READY) {
         LONG sc = InterlockedIncrement(&dext->StatusCount);
-        if (sc <= 3 || (sc % 500) == 0)
-            drv_log("IOCTL STATUS poll");
+        if (sc <= 3 || (sc % 500) == 0) {
+            if (ioctl == IOCTL_RVPN_STATUS)
+                drv_log("IOCTL STATUS poll");
+            else
+                drv_log("IOCTL READY poll");
+        }
     } else {
         drv_log_ioctl(ioctl, inLen, outLen,
                       (const UCHAR *)sysBuffer, inLen < outLen ? outLen : inLen);
@@ -640,6 +645,13 @@ static NTSTATUS NTAPI DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Ir
         if (outLen >= 4 && sysBuffer) {
             *((ULONG *)sysBuffer) = 1;
             info = 4;
+        }
+        break;
+
+    case IOCTL_RVPN_READY:
+        if (outLen >= 1 && sysBuffer) {
+            *((UCHAR *)sysBuffer) = 0x20;
+            info = 1;
         }
         break;
 
