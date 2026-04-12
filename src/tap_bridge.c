@@ -178,8 +178,11 @@ int main(int argc, char *argv[])
                 perror("tap_bridge: write to TAP");
             }
             drv_to_tap++;
-            if (drv_to_tap <= 5 || (drv_to_tap % 100) == 0)
-                fprintf(stderr, "tap_bridge: drv→TAP #%lu (%u bytes)\n", drv_to_tap, len);
+            if (drv_to_tap <= 5 || (drv_to_tap % 100) == 0) {
+                fprintf(stderr, "tap_bridge: drv→TAP #%lu (%u bytes) hex: ", drv_to_tap, len);
+                for(int i=0; i < (len < 32 ? len : 32); i++) fprintf(stderr, "%02x ", buf[i]);
+                fprintf(stderr, "\n");
+            }
         }
     }
 

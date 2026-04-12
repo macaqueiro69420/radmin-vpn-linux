@@ -96,6 +96,7 @@ cp "$BUILD_DIR/rvpnnetmp.sys" "$WINEPREFIX/drive_c/windows/system32/drivers/"
 cp "$BUILD_DIR/adapter_hook.dll" "$RADMIN/"
 cp "$BUILD_DIR/rvpn_launcher.exe" "$RADMIN/"
 cp "$BUILD_DIR/netsh.exe" "$WINEPREFIX/drive_c/windows/syswow64/netsh.exe"
+cp "$BUILD_DIR/netsh64.exe" "$WINEPREFIX/drive_c/windows/system32/netsh.exe"
 
 # 4. Generate or load persistent adapter MAC
 if [ -f "$MAC_FILE" ]; then
@@ -116,6 +117,10 @@ sudo ip link delete "$TAP_DEV" 2>/dev/null || true
 sudo ip tuntap add dev "$TAP_DEV" mode tap user "$(whoami)"
 sudo ip link set "$TAP_DEV" address "$ADAPTER_MAC"
 sudo ip link set "$TAP_DEV" up
+# Disable reverse-path filtering — VPN peers have IPs from 26.x.x.x but
+# the kernel may not find a matching route back, causing it to drop replies.
+sudo sysctl -w "net.ipv4.conf.$TAP_DEV.rp_filter=0" >/dev/null 2>&1 || true
+sudo sysctl -w "net.ipv4.conf.$TAP_DEV.accept_local=1" >/dev/null 2>&1 || true
 echo "[+] TAP $TAP_DEV created (MAC=$ADAPTER_MAC)"
 
 # 6. Start tap_bridge
@@ -189,7 +194,7 @@ rm -f "$LOG" "$WINEPREFIX/drive_c/radmin_driver.log"
 # 10. Start service
 echo "[*] Starting Radmin VPN service..."
 cd "$RADMIN"
-WINEDEBUG=-all wine rvpn_launcher.exe /run > /tmp/radmin_service.log 2>&1 &
+WINEDEBUG=${WINEDEBUG:-"-all"} wine rvpn_launcher.exe /run > /tmp/radmin_service.log 2>&1 &
 
 # 11. Wait for service ready + extract VPN IP
 echo "[*] Waiting for service ready..."
@@ -216,8 +221,14 @@ if has_ready:
     pgrep -f RvControlSvc >/dev/null || { echo "[-] Service died"; exit 1; }
 done
 
-# 12. Set up on-link route
+# 12. Assign VPN IP to TAP device + set up route
 sleep 2
+if [ -n "$vpn_ip" ]; then
+    # Explicitly assign the VPN IP (fallback if netsh_wrapper wasn't invoked)
+    sudo ip addr add "$vpn_ip/8" dev "$TAP_DEV" 2>/dev/null || true
+    sudo ip link set "$TAP_DEV" up 2>/dev/null || true
+    echo "[+] TAP IP: $vpn_ip/8"
+fi
 sudo ip route replace 26.0.0.0/8 dev "$TAP_DEV"
 echo "[+] Route: 26.0.0.0/8 dev $TAP_DEV (on-link)"
 echo ""

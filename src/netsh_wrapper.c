@@ -58,15 +58,20 @@ int wmain(int argc, WCHAR *argv[])
     /* Also: "interface set interface XXX ENABLE" */
     /* Also: "interface ipv6 add address interface=XXX address=YYY" */
 
-    if (strstr(cmdline, "interface") && strstr(cmdline, "add address")) {
+    if (strstr(cmdline, "interface") &&
+        (strstr(cmdline, "add address") || strstr(cmdline, "set address"))) {
         char *p;
-        /* Extract addr= */
-        p = strstr(cmdline, "addr=");
-        if (!p) p = strstr(cmdline, "address=");
-        if (p) {
-            p = strchr(p, '=') + 1;
-            addr = p;
-            char *end = strchr(p, ' ');
+        /* Extract addr= or address= (use address= first for "set address") */
+        if (strstr(cmdline, "set address")) {
+            p = strstr(cmdline, "address=");
+            if (p) { p = strchr(p, '=') + 1; addr = p; }
+        } else {
+            p = strstr(cmdline, "addr=");
+            if (!p) p = strstr(cmdline, "address=");
+            if (p) { p = strchr(p, '=') + 1; addr = p; }
+        }
+        if (addr) {
+            char *end = strchr(addr, ' ');
             if (end) *end = '\0';
         }
         /* Extract mask= */

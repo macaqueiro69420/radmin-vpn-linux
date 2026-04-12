@@ -176,7 +176,7 @@ static RX_RING g_rx_ring;
  * completion to the correct ReadFile caller. This is what the real
  * NDIS miniport driver does (confirmed from RE of NetMP60_1_1_64.sys). */
 
-#define IRP_QUEUE_SIZE 256
+#define IRP_QUEUE_SIZE 1024
 
 static struct {
     KSPIN_LOCK Lock;
@@ -376,6 +376,10 @@ static void __stdcall rx_thread_proc(PVOID context)
                     dstMac[0] == 0xFF && dstMac[1] == 0xFF && dstMac[2] == 0xFF &&
                     dstMac[3] == 0xFF && dstMac[4] == 0xFF && dstMac[5] == 0xFF);
 
+                /* Static temporary arrays for safe compaction */
+                static PIRP tempIrps[IRP_QUEUE_SIZE];
+                static PFILE_OBJECT tempFileObjs[IRP_QUEUE_SIZE];
+
                 /* Find the right FILE_OBJECT for unicast */
                 PFILE_OBJECT target_fo = NULL;
                 if (!is_bcast && frameLen >= 6) {
@@ -391,9 +395,9 @@ static void __stdcall rx_thread_proc(PVOID context)
 
                 if (is_bcast) {
                     /* Broadcast: deliver to one IRP per unique FILE_OBJECT */
-                    PIRP batch[64];
+                    static PIRP batch[1024];
                     LONG batch_n = 0;
-                    PFILE_OBJECT seen[64];
+                    static PFILE_OBJECT seen[1024];
                     LONG seen_n = 0;
                     LONG remaining = 0;
 
@@ -404,20 +408,24 @@ static void __stdcall rx_thread_proc(PVOID context)
                         for (LONG s = 0; s < seen_n; s++) {
                             if (seen[s] == fo) { already = 1; break; }
                         }
-                        if (!already && seen_n < 64) {
+                        if (!already && seen_n < IRP_QUEUE_SIZE) {
                             seen[seen_n++] = fo;
                             batch[batch_n++] = g_irp_queue.Irps[idx];
                             /* Mark slot as consumed by shifting */
                         } else {
                             /* Keep this IRP in queue (compact later) */
-                            g_irp_queue.Irps[remaining] = g_irp_queue.Irps[idx];
-                            g_irp_queue.FileObjs[remaining] = g_irp_queue.FileObjs[idx];
+                            tempIrps[remaining] = g_irp_queue.Irps[idx];
+                            tempFileObjs[remaining] = g_irp_queue.FileObjs[idx];
                             remaining++;
                         }
                     }
                     g_irp_queue.Head = 0;
                     g_irp_queue.Tail = remaining;
                     g_irp_queue.Count = remaining;
+                    for (LONG i = 0; i < remaining; i++) {
+                        g_irp_queue.Irps[i] = tempIrps[i];
+                        g_irp_queue.FileObjs[i] = tempFileObjs[i];
+                    }
                     KeReleaseSpinLock(&g_irp_queue.Lock, oldIrql);
 
                     for (LONG i = 0; i < batch_n; i++) {
@@ -425,28 +433,52 @@ static void __stdcall rx_thread_proc(PVOID context)
                         InterlockedIncrement(&g_irp_completed);
                     }
                 } else if (target_fo) {
-                    /* Unicast: find IRP from matching FILE_OBJECT */
+                    /* Unicast: prefer IRP from matching FILE_OBJECT,
+                     * but fall back to oldest IRP from any handle.
+                     * The service routes frames by TLV mac_prefix,
+                     * not by handle identity, so any handle works. */
                     PIRP found = NULL;
-                    LONG remaining = 0;
+                    LONG found_iter = -1;
+
+                    /* Try to find IRP from target FILE_OBJECT */
                     for (LONG i = 0; i < g_irp_queue.Count; i++) {
                         LONG idx = (g_irp_queue.Head + i) % IRP_QUEUE_SIZE;
-                        if (!found && g_irp_queue.FileObjs[idx] == target_fo) {
+                        if (g_irp_queue.FileObjs[idx] == target_fo) {
                             found = g_irp_queue.Irps[idx];
-                        } else {
-                            g_irp_queue.Irps[remaining] = g_irp_queue.Irps[idx];
-                            g_irp_queue.FileObjs[remaining] = g_irp_queue.FileObjs[idx];
-                            remaining++;
+                            found_iter = i;
+                            break;
                         }
+                    }
+
+                    /* Fallback: oldest IRP from any handle */
+                    if (!found) {
+                        found = g_irp_queue.Irps[g_irp_queue.Head];
+                        found_iter = 0;
+                        static LONG fb_cnt = 0;
+                        if (InterlockedIncrement(&fb_cnt) <= 10)
+                            drv_log("RX unicast fallback (no IRP for target fo)");
+                    }
+
+                    /* Remove found IRP from queue by compaction */
+                    LONG remaining = 0;
+                    for (LONG i = 0; i < g_irp_queue.Count; i++) {
+                        if (i == found_iter) continue;
+                        LONG idx = (g_irp_queue.Head + i) % IRP_QUEUE_SIZE;
+                        tempIrps[remaining] = g_irp_queue.Irps[idx];
+                        tempFileObjs[remaining] = g_irp_queue.FileObjs[idx];
+                        remaining++;
                     }
                     g_irp_queue.Head = 0;
                     g_irp_queue.Tail = remaining;
                     g_irp_queue.Count = remaining;
+                    for (LONG i = 0; i < remaining; i++) {
+                        g_irp_queue.Irps[i] = tempIrps[i];
+                        g_irp_queue.FileObjs[i] = tempFileObjs[i];
+                    }
                     KeReleaseSpinLock(&g_irp_queue.Lock, oldIrql);
 
-                    if (found) {
-                        complete_read_irp(found, frameBuf, frameLen);
-                        InterlockedIncrement(&g_irp_completed);
-                    }
+                    complete_read_irp(found, frameBuf, frameLen);
+                    InterlockedIncrement(&g_irp_completed);
                 } else {
                     /* No route — fallback: oldest IRP */
                     PIRP irp = g_irp_queue.Irps[g_irp_queue.Head];
@@ -582,12 +614,15 @@ static NTSTATUS NTAPI DispatchClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return STATUS_SUCCESS;
 }
 
-/* IOCTL codes */
-#define IOCTL_RVPN_VERSION  0x0022c004
-#define IOCTL_RVPN_STATUS   0x00224018
-#define IOCTL_RVPN_READY    0x00224020
-#define IOCTL_RVPN_SETUP    0x0022801c
-#define IOCTL_RVPN_PEERMAC  0x00228014
+/* IOCTL codes — derived from RvNetMP60.sys RE and RvControlSvc.exe call sites */
+#define IOCTL_RVPN_VERSION    0x0022c004  /* in:8B (ver+mac), out:12B */
+#define IOCTL_RVPN_STATUS     0x00224018  /* in:0, out:4B state */
+#define IOCTL_RVPN_CONNECT    0x00224020  /* in:0, out:1B media-connected byte */
+#define IOCTL_RVPN_SETLINK    0x00224010  /* in:0xb8B adapter info, out:0 */
+#define IOCTL_RVPN_SETUP      0x0022801c  /* in:4B mode, out:0 */
+#define IOCTL_RVPN_PEERMAC    0x00228014  /* in:6B MAC, out:0 */
+#define IOCTL_RVPN_SETMAC     0x00228024  /* in/out:various */
+#define IOCTL_RVPN_VERSION2   0x0022c004  /* alias */
 
 static NTSTATUS NTAPI DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
@@ -602,14 +637,10 @@ static NTSTATUS NTAPI DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Ir
     PDEVICE_EXTENSION dext = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
     InterlockedIncrement(&dext->IoctlCount);
 
-    if (ioctl == IOCTL_RVPN_STATUS || ioctl == IOCTL_RVPN_READY) {
+    if (ioctl == IOCTL_RVPN_STATUS) {
         LONG sc = InterlockedIncrement(&dext->StatusCount);
-        if (sc <= 3 || (sc % 500) == 0) {
-            if (ioctl == IOCTL_RVPN_STATUS)
-                drv_log("IOCTL STATUS poll");
-            else
-                drv_log("IOCTL READY poll");
-        }
+        if (sc <= 3 || (sc % 500) == 0)
+            drv_log("IOCTL STATUS poll");
     } else {
         drv_log_ioctl(ioctl, inLen, outLen,
                       (const UCHAR *)sysBuffer, inLen < outLen ? outLen : inLen);
@@ -642,18 +673,38 @@ static NTSTATUS NTAPI DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Ir
         break;
 
     case IOCTL_RVPN_STATUS:
+        /* Returns 4-byte NDIS adapter status. Bit 0 = media present/active.
+         * Service checks: if (status != 0 && (status & 1)) → call IOCTL_RVPN_CONNECT.
+         * We report 1 (connected). */
         if (outLen >= 4 && sysBuffer) {
             *((ULONG *)sysBuffer) = 1;
             info = 4;
         }
         break;
 
-    case IOCTL_RVPN_READY:
+    case IOCTL_RVPN_CONNECT:
+        /* Returns 1-byte media-connected state from NDIS adapter status byte.
+         * Real driver returns: adapter_status_byte & 0x20 (NdisMediaStateConnected flag).
+         * Service uses DeviceIoControl(h, 0x224020, NULL, 0, &out, 1, &br, NULL).
+         * If br==0 (no bytes written), DeviceIoControl returns FALSE → service logs
+         * IOCTL failure and sends CDeviceRemoved message → VPN disconnects.
+         * Must write exactly 1 byte to avoid that failure path. 0x20 = connected. */
         if (outLen >= 1 && sysBuffer) {
-            *((UCHAR *)sysBuffer) = 0x20;
+            *((UCHAR *)sysBuffer) = 0x20;  /* NdisMediaStateConnected */
             info = 1;
         }
         break;
+
+    case IOCTL_RVPN_SETLINK:
+        /* Accepts 0xb8 bytes of adapter info from service. No output.
+         * Used to propagate NDIS link info. Accept silently. */
+        break;
+
+    case IOCTL_RVPN_SETMAC:
+        /* Set/query MAC or connection params. Accept silently. */
+        break;
+
+
 
     case IOCTL_RVPN_SETUP:
         if (inLen >= 4 && sysBuffer) {
@@ -668,11 +719,28 @@ static NTSTATUS NTAPI DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Ir
         if (inLen >= 6 && sysBuffer) {
             PIO_STACK_LOCATION sp2 = IoGetCurrentIrpStackLocation(Irp);
             PFILE_OBJECT fo = sp2->FileObject;
-            LONG idx = InterlockedIncrement(&g_peer_route_count) - 1;
-            if (idx < MAX_PEER_ROUTES) {
-                g_peer_routes[idx].fo = fo;
-                RtlCopyMemory(g_peer_routes[idx].mac, sysBuffer, 6);
+
+            /* Update existing entry for this MAC (handles peer reconnect
+             * with new FILE_OBJECT), or append a new entry */
+            LONG found_r = -1;
+            LONG rc2 = g_peer_route_count;
+            if (rc2 > MAX_PEER_ROUTES) rc2 = MAX_PEER_ROUTES;
+            for (LONG r = 0; r < rc2; r++) {
+                if (RtlCompareMemory(g_peer_routes[r].mac, sysBuffer, 6) == 6) {
+                    found_r = r;
+                    break;
+                }
             }
+            if (found_r >= 0) {
+                g_peer_routes[found_r].fo = fo;  /* update FILE_OBJECT */
+            } else {
+                LONG idx = InterlockedIncrement(&g_peer_route_count) - 1;
+                if (idx < MAX_PEER_ROUTES) {
+                    g_peer_routes[idx].fo = fo;
+                    RtlCopyMemory(g_peer_routes[idx].mac, sysBuffer, 6);
+                }
+            }
+
             char buf[64] = "PEERMAC fo=";
             hex32(buf + 11, (ULONG)(ULONG_PTR)fo);
             buf[19] = ' ';
@@ -877,11 +945,21 @@ static NTSTATUS NTAPI DispatchWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         /* Log every inbound ICMP (peer → Linux) */
         if (is_ipv4_icmp(inBuf + offset, (USHORT)frameLen)) {
             LONG n = InterlockedIncrement(&g_icmp_tx);
-            char buf[64] = "ICMP-IN  #";
+            char buf[128] = "ICMP-IN  #";
             hex32(buf + 10, (ULONG)n);
             buf[18] = ' '; buf[19] = 'l'; buf[20] = '=';
             hex32(buf + 21, (ULONG)frameLen);
-            buf[29] = 0;
+            buf[29] = ' ';
+            buf[30] = 'd';
+            buf[31] = '=';
+            int p = 32;
+            for(int k = 0; k < (frameLen < 16 ? frameLen : 16); k++) {
+                UCHAR b = inBuf[offset + k];
+                buf[p++] = "0123456789abcdef"[b >> 4];
+                buf[p++] = "0123456789abcdef"[b & 0xf];
+                buf[p++] = ' ';
+            }
+            buf[p] = 0;
             drv_log(buf);
         }
 
