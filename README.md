@@ -16,7 +16,7 @@ Linux app ← TAP (radminvpn0) ← tap_bridge ← FIFO ← rvpnnetmp.sys (Wine d
 
 ## Prerequisites
 
-- **Wine** >= 9.0 (tested on Wine 11.5, Arch Linux)
+- **Wine** >= 11.0 (tested on Wine 11.5 Arch Linux and on Wine 11.6 Ubuntu 24.04)
 - **mingw-w64** cross-compilers (`i686-w64-mingw32-gcc`, `x86_64-w64-mingw32-gcc`) — for building from source
 - **python3** — for service log parsing
 - **sudo** access — for TAP device creation and routing
@@ -108,7 +108,7 @@ The wineprefix is stored in `./wineprefix/`. A persistent MAC address is generat
 
 - Only one instance can run at a time (shared FIFOs in `/tmp/`)
 - The `26.0.0.0/8` on-link route affects the entire system while running (cleaned up on exit)
-- Older Wine versions (< 9.0) may have different overlapped I/O behavior that breaks the driver
+- Older Wine versions (< 11.0) may have different overlapped I/O behavior that breaks the driver
 
 ## Notes
 

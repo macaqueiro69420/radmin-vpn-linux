@@ -190,7 +190,7 @@ static struct {
 /* Per-handle peer MAC routing table.
  * IOCTL_RVPN_PEERMAC associates a MAC with the calling FILE_OBJECT.
  * The RX thread uses this to route frames to the right handle. */
-#define MAX_PEER_ROUTES 64
+#define MAX_PEER_ROUTES 1024
 static struct {
     PFILE_OBJECT fo;
     UCHAR mac[6];
