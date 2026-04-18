@@ -1,27 +1,29 @@
-# Radmin VPN for Linux
+# Radmin VPN para Linux
 
-Run [Radmin VPN](https://www.radmin-vpn.com/) on Linux via Wine. Join VPN networks, see peers, play games — all without a Windows VM.
+Execute o [Radmin VPN](https://www.radmin-vpn.com/) no Linux via Wine. Junte-se a redes VPN, veja pares, jogue jogos — tudo sem uma VM Windows.
 
-> I did not build this because it was easier than a VM. I built it because I thought it was easier than a VM.
+> Eu não construí isso porque era mais fácil que uma VM. Eu construí porque achei que seria mais fácil que uma VM.
 
-**AI-assisted code.** Built collaboratively between a human and Claude (Anthropic). The driver, hooks, and bridge were written with extensive AI-assisted reverse engineering of Radmin VPN's undocumented driver protocol using Ghidra. **This works, but comes with no guarantees.** Not affiliated with Famatech. Radmin VPN is proprietary — download it yourself from [radmin-vpn.com](https://www.radmin-vpn.com/). Use at your own risk.
+**Código assistido por IA.** Construído colaborativamente entre um humano e Claude (Anthropic). O driver, hooks e ponte foram escritos com extensa engenharia reversa assistida por IA do protocolo de driver não documentado do Radmin VPN usando Ghidra. **Isso funciona, mas não oferece garantias.** Não afiliado à Famatech. Radmin VPN é proprietário — baixe você mesmo em [radmin-vpn.com](https://www.radmin-vpn.com/). Use por sua conta e risco.
 
-## How it works
+**Desenvolvido pela Confia Company.**
 
-Radmin VPN's Windows service talks to an NDIS miniport driver for its virtual network adapter. Wine doesn't support NDIS, so we replace the driver with our own implementation that bridges to a Linux TAP device. A hook DLL handles Wine compatibility issues (adapter naming, registry permissions). The result is a fully functional Radmin VPN client running natively under Wine.
+## Como funciona
+
+O serviço Windows do Radmin VPN se comunica com um driver miniport NDIS para seu adaptador de rede virtual. O Wine não suporta NDIS, então substituímos o driver com nossa própria implementação que faz ponte para um dispositivo TAP Linux. Uma DLL hook lida com problemas de compatibilidade do Wine (nomeação de adaptador, permissões de registro). O resultado é um cliente Radmin VPN totalmente funcional rodando nativamente sob Wine.
 
 ```
 Linux app ← TAP (radminvpn0) ← tap_bridge ← FIFO ← rvpnnetmp.sys (Wine driver) ← RvControlSvc.exe
 ```
 
-## Prerequisites
+## Pré-requisitos
 
-- **Wine** >= 11.0 (tested on Wine 11.5 Arch Linux and on Wine 11.6 Ubuntu 24.04)
-- **mingw-w64** cross-compilers (`i686-w64-mingw32-gcc`, `x86_64-w64-mingw32-gcc`) — for building from source
-- **python3** — for service log parsing
-- **sudo** access — for TAP device creation and routing
-- **TUN/TAP kernel support** — usually built-in, check with `modprobe tun`
-- **Radmin VPN installer** — download from [radmin-vpn.com](https://www.radmin-vpn.com/)
+- **Wine** >= 11.0 (testado no Wine 11.5 Arch Linux e no Wine 11.6 Ubuntu 24.04)
+- **mingw-w64** compiladores cross-platform (`i686-w64-mingw32-gcc`, `x86_64-w64-mingw32-gcc`) — para compilar a partir do código fonte
+- **python3** — para análise de logs do serviço
+- **sudo** acesso — para criação de dispositivo TAP e roteamento
+- **Suporte de kernel TUN/TAP** — geralmente embutido, verifique com `modprobe tun`
+- **Instalador do Radmin VPN** — baixe de [radmin-vpn.com](https://www.radmin-vpn.com/)
 
 ### Arch Linux
 
@@ -35,91 +37,103 @@ sudo pacman -S wine mingw-w64-gcc python
 sudo apt install wine64 wine32 gcc-mingw-w64 python3
 ```
 
-## Quick start
+## Início rápido
 
 ```bash
 git clone https://github.com/baptisterajaut/radmin-vpn-linux.git
 cd radmin-vpn-linux
 
-# Option A: download pre-built binaries from GitHub Releases
+# Opção A: baixar binários pré-compilados do GitHub Releases
 mkdir -p build
 TAG=$(curl -sI https://github.com/baptisterajaut/radmin-vpn-linux/releases/latest | grep -i location | grep -oP 'v[\d.]+')
 curl -sL "https://github.com/baptisterajaut/radmin-vpn-linux/releases/download/${TAG}/radmin-vpn-linux-${TAG}.tar.gz" \
   | tar xz -C build/
 
-# Option B: build from source
+# Opção B: compilar a partir do código fonte
 make
 
-# Download Radmin VPN installer from https://www.radmin-vpn.com/
+# Baixe o instalador do Radmin VPN de https://www.radmin-vpn.com/
 ./run.sh --installer ~/Downloads/Radmin_VPN_*.exe
 ```
 
-On subsequent runs, just:
+Nas execuções subsequentes, apenas:
 
 ```bash
 ./run.sh
 ```
 
-## Building from source
+## Compilando a partir do código fonte
 
-Requires `mingw-w64` cross-compilers. Pre-built binaries are available from [Releases](https://github.com/baptisterajaut/radmin-vpn-linux/releases) (built by CI on each tagged version) if you don't want to install mingw.
+Requer compiladores cross-platform `mingw-w64`. Binários pré-compilados estão disponíveis em [Releases](https://github.com/baptisterajaut/radmin-vpn-linux/releases) (construídos por CI em cada versão marcada) se você não quiser instalar mingw.
 
 ```bash
-make          # build everything to build/
-make clean    # remove build artifacts
+make          # compila tudo para build/
+make clean    # remove artefatos de compilação
 ```
 
-Produces:
-- `build/rvpnnetmp.sys` — Wine kernel driver (64-bit PE)
-- `build/adapter_hook.dll` — Hook DLL (32-bit PE)
-- `build/rvpn_launcher.exe` — DLL injector (32-bit PE)
-- `build/netsh.exe` — netsh replacement (32-bit PE)
-- `build/tap_bridge` — native Linux TAP bridge
+Produz:
+- `build/rvpnnetmp.sys` — driver kernel Wine (PE 64-bit)
+- `build/adapter_hook.dll` — Hook DLL (PE 32-bit)
+- `build/rvpn_launcher.exe` — injetor de DLL (PE 32-bit)
+- `build/netsh.exe` — substituto do netsh (PE 32-bit)
+- `build/netsh64.exe` — substituto do netsh (PE 64-bit)
+- `build/tap_bridge` — ponte TAP Linux nativa
 
-## What `run.sh` does
+## O que o `run.sh` faz
 
-1. **First run**: installs Radmin VPN via Wine (`/VERYSILENT`), removes the real NDIS driver (incompatible with Wine), registers our custom driver
-2. **Every run**: creates a TAP device, starts the TAP-to-FIFO bridge, configures Wine registry (adapter GUID, driver service), launches the Radmin VPN service and GUI
-3. **On exit** (Ctrl+C or close GUI): kills Wine, removes TAP device, cleans up
+1. **Primeira execução**: instala o Radmin VPN via Wine (`/VERYSILENT`), remove o driver NDIS real (incompatível com Wine), registra nosso driver personalizado
+2. **Cada execução**: cria um dispositivo TAP com suporte multicast, configura configurações sysctl do kernel (filtragem de caminho reverso, accept_local), inicia a ponte TAP-para-FIFO, configura o registro do Wine (GUID do adaptador, serviço de driver), inicia o serviço e GUI do Radmin VPN
+3. **Ao sair** (Ctrl+C ou fechar GUI): mata o Wine, remove o dispositivo TAP, limpa
 
-The wineprefix is stored in `./wineprefix/`. A persistent MAC address is generated on first run and saved in the wineprefix.
+O wineprefix é armazenado em `./wineprefix/`. Um endereço MAC persistente é gerado na primeira execução e salvo no wineprefix.
 
-## Architecture
+## Arquitetura
 
-| Component | Description |
+| Componente | Descrição |
 |---|---|
-| `rvpnnetmp.sys` | Wine kernel driver. Emulates the Radmin NDIS miniport. Handles IOCTLs (VERSION, STATUS, SETUP, PEERMAC), TLV frame encoding/decoding, IRP queue for overlapped I/O, MAC-based frame routing for multi-peer support. |
-| `adapter_hook.dll` | Companion DLL loaded alongside RvControlSvc.exe. IAT hooks: renames TAP adapter to match Radmin's expected name, no-ops `RegSetKeySecurity` to work around a Wine SCM bug where services lack the SYSTEM SID. |
-| `tap_bridge` | Native Linux binary. Relays ethernet frames between the TAP device and named pipes (FIFOs) that the Wine driver reads/writes. |
-| `netsh.exe` | Replaces Wine's netsh stub. Translates Windows `netsh interface ip` commands to Linux `ip addr`/`ip link` commands via a file-based relay. |
-| `rvpn_launcher.exe` | Injects `adapter_hook.dll` into the Radmin service process via `CreateRemoteThread` + `LoadLibrary`. |
+| `rvpnnetmp.sys` | Driver kernel Wine. Emula o miniport NDIS do Radmin. Manipula IOCTLs (VERSION, STATUS, SETUP, PEERMAC), codificação/decodificação de frames TLV, fila IRP para I/O sobreposto, roteamento de frames baseado em MAC para suporte multi-par. |
+| `adapter_hook.dll` | DLL companheira carregada junto com RvControlSvc.exe. Hooks IAT: renomeia o adaptador TAP para corresponder ao nome esperado pelo Radmin, no-ops `RegSetKeySecurity` para contornar um bug do Wine SCM onde serviços não têm o SYSTEM SID. |
+| `tap_bridge` | Binário Linux nativo. Retransmite frames ethernet entre o dispositivo TAP e pipes nomeados (FIFOs) que o driver Wine lê/escreve. |
+| `netsh.exe` / `netsh64.exe` | Substitui o stub netsh do Wine (versões 32-bit e 64-bit). Traduz comandos Windows `netsh interface ip` para comandos Linux `ip addr`/`ip link` via um retransmissor baseado em arquivo. |
+| `rvpn_launcher.exe` | Injeta `adapter_hook.dll` no processo do serviço Radmin via `CreateRemoteThread` + `LoadLibrary`. |
 
-## Troubleshooting
+## Solução de problemas
 
-**GUI stuck on "Waiting for adapter"**: the driver isn't loading. Check that `wineprefix/drive_c/radmin_driver.log` exists and has content. If empty, the driver service registration may be missing — delete the wineprefix and re-run.
+**GUI presa em "Waiting for adapter"**: o driver não está carregando. Verifique se `wineprefix/drive_c/radmin_driver.log` existe e tem conteúdo. Se vazio, o registro do serviço de driver pode estar ausente — delete o wineprefix e execute novamente.
 
-**Service dies immediately**: check `/tmp/radmin_service.log` for Wine errors. Common cause: old wineprefix from a different Wine version. Delete `./wineprefix/` and re-run.
+**Serviço morre imediatamente**: verifique `/tmp/radmin_service.log` para erros do Wine. Causa comum: wineprefix antigo de uma versão diferente do Wine. Delete `./wineprefix/` e execute novamente.
 
-**0% packet loss with one peer, high loss with many**: this was the original bug — fixed by MAC-based frame routing in the driver. Make sure you're using the latest build.
+**0% perda de pacotes com um par, alta perda com muitos**: este foi o bug original — corrigido pelo roteamento de frames baseado em MAC no driver. Certifique-se de usar a compilação mais recente.
 
-**First ping is slow (~1s)**: normal — it's ARP resolution through the VPN tunnel. Subsequent pings are 40-80ms depending on peer distance.
+**Primeiro ping é lento (~1s)**: normal — é resolução ARP através do túnel VPN. Pings subsequentes são 40-80ms dependendo da distância do par.
 
-## Known limitations
+## Limitações conhecidas
 
-- Only one instance can run at a time (shared FIFOs in `/tmp/`)
-- The `26.0.0.0/8` on-link route affects the entire system while running (cleaned up on exit)
-- Older Wine versions (< 11.0) may have different overlapped I/O behavior that breaks the driver
+- Apenas uma instância pode executar por vez (FIFOs compartilhados em `/tmp/`)
+- A rota on-link `26.0.0.0/8` afeta todo o sistema durante a execução (limpa ao sair)
+- Versões mais antigas do Wine (< 11.0) podem ter comportamento de I/O sobreposto diferente que quebra o driver
 
-## Notes
+## Suporte Minecraft LAN
 
-**Ban risk.** Each fresh wineprefix creates a new registration ID with Famatech's servers. Don't delete and recreate your wineprefix unnecessarily. Reuse it across sessions.
+O dispositivo TAP é configurado com suporte multicast para habilitar descoberta LAN do Minecraft. O script:
+- Habilita multicast e allmulticast na interface TAP
+- Entra no grupo multicast LAN do Minecraft `224.0.2.60`
+- Configura configurações sysctl do kernel para permitir tráfego VPN (desabilita filtragem de caminho reverso, habilita accept_local)
 
-**Wine bug workaround.** The `RegSetKeySecurity` hook works around a [known Wine limitation](https://forum.winehq.org/viewtopic.php?t=37183) where services don't receive the SYSTEM SID (S-1-5-18). This may be fixed upstream in a future Wine release.
+## Notas
 
-## License
+**Risco de ban.** Cada wineprefix fresco cria um novo ID de registro com os servidores da Famatech. Não delete e recrie seu wineprefix desnecessariamente. Reuse-o através de sessões.
 
-GPL-3.0. See [LICENSE](LICENSE).
+**Contorno de bug do Wine.** O hook `RegSetKeySecurity` contorna uma [limitação conhecida do Wine](https://forum.winehq.org/viewtopic.php?t=37183) onde serviços não recebem o SYSTEM SID (S-1-5-18). Isso pode ser corrigido upstream em uma versão futura do Wine.
 
-In spirit, this code is public domain — do whatever you want with it. The GPL is here as a legal safety net: it explicitly protects reverse engineering for interoperability, which is what this project does. Belt and suspenders.
+## Licença
 
-Radmin VPN is proprietary software by Famatech Corp. This project provides interoperability tools only — no Famatech code is included or distributed.
+**Licença Confia Company**
+
+Este software é propriedade da Confia Company. O uso é estritamente limitado ao ConfiaOS 2.3, exceto para desenvolvedores autorizados pela Confia Company.
+
+- Uso fora do ConfiaOS 2.3 é proibido, exceto para desenvolvedores com autorização explícita da Confia Company
+- Modificação, redistribuição ou uso comercial sem permissão é estritamente proibido
+- Todos os direitos reservados © Confia Company
+
+Radmin VPN é software proprietário da Famatech Corp. Este projeto fornece apenas ferramentas de interoperabilidade — nenhum código da Famatech está incluído ou distribuído.

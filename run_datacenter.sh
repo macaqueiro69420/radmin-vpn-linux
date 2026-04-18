@@ -1,22 +1,32 @@
 #!/bin/bash
-# run.sh - Radmin VPN on Linux
-# Usage: ./run.sh [--installer /path/to/Radmin_VPN_*.exe]
+# run_datacenter.sh - Radmin VPN Datacenter Edition
+# Runs on headless VPS (no display server) using Xvfb + noVNC for web-based GUI access
+# Usage: ./run_datacenter.sh [--installer /path/to/Radmin_VPN_*.exe] [--vnc-port PORT] [--web-port PORT] [--vnc-password PASS]
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-# When launched from the AppImage, AppRun already exports WINEPREFIX and BUILD_DIR.
-# Fall back to the traditional $DIR-relative paths when running directly.
-export WINEPREFIX="${WINEPREFIX:-$DIR/wineprefix}"
+export WINEPREFIX="$DIR/wineprefix"
 RADMIN="$WINEPREFIX/drive_c/Program Files (x86)/Radmin VPN"
-BUILD_DIR="${BUILD_DIR:-$DIR/build}"
+BUILD_DIR="$DIR/build"
 TAP_DEV="radminvpn0"
 CMD_FILE="/tmp/radmin_netsh_cmd"
 LOG="$WINEPREFIX/drive_c/ProgramData/Famatech/Radmin VPN/service.log"
 MAC_FILE="$WINEPREFIX/radmin_mac"
+
+# Virtual display settings
+VNC_DISPLAY=:99
+VNC_PORT=5900
+WEB_PORT=6080
+VNC_PASSWORD=""
+NOVNC_PATH=""
+
+# PIDs for cleanup
+XVFB_PID=""
+X11VNC_PID=""
+WEBSOCKIFY_PID=""
 RELAY_PID=""
 BRIDGE_PID=""
-FILTER_UI_PID=""
-NO_UI=0
+GUI_PID=""
 
 # Parse args
 INSTALLER=""
@@ -24,68 +34,154 @@ for arg in "$@"; do
     case "$arg" in
         --installer) shift; INSTALLER="$1"; shift ;;
         --installer=*) INSTALLER="${arg#*=}" ;;
-        --no-ui) NO_UI=1 ;;
+        --vnc-port) shift; VNC_PORT="$1"; shift ;;
+        --vnc-port=*) VNC_PORT="${arg#*=}" ;;
+        --web-port) shift; WEB_PORT="$1"; shift ;;
+        --web-port=*) WEB_PORT="${arg#*=}" ;;
+        --vnc-password) shift; VNC_PASSWORD="$1"; shift ;;
+        --vnc-password=*) VNC_PASSWORD="${arg#*=}" ;;
     esac
 done
 
 # Find installer if not specified
 if [ -z "$INSTALLER" ]; then
-    # Search project dir first, then BUILD_DIR (where AppImage bundles it)
     INSTALLER=$(find "$DIR" -maxdepth 1 -name "Radmin_VPN_*.exe" -print -quit 2>/dev/null || true)
-    if [ -z "$INSTALLER" ]; then
-        INSTALLER=$(find "$BUILD_DIR" -maxdepth 1 -name "Radmin_VPN_*.exe" -print -quit 2>/dev/null || true)
-    fi
-fi
-
-# Download installer at runtime if still not found
-INSTALLER_URL="${RADMIN_INSTALLER_URL:-https://download.radmin-vpn.com/download/files/Radmin_VPN_2.0.4899.9.exe}"
-if [ -z "$INSTALLER" ] || [ ! -f "$INSTALLER" ]; then
-    echo "[*] No local installer found — downloading from $INSTALLER_URL"
-    DOWNLOAD_DIR="${RADMIN_DATA_DIR:-$HOME/.local/share/radmin-vpn-linux}"
-    mkdir -p "$DOWNLOAD_DIR"
-    INSTALLER="$DOWNLOAD_DIR/Radmin_VPN_2.0.4899.9.exe"
-    if [ ! -f "$INSTALLER" ]; then
-        curl -fL -o "$INSTALLER" "$INSTALLER_URL" || { echo "[-] Download failed"; exit 1; }
-        echo "[+] Installer downloaded to $INSTALLER"
-    else
-        echo "[+] Using cached installer: $INSTALLER"
-    fi
 fi
 
 cleanup() {
-    echo "[*] Stopping..."
-    [ -n "$FILTER_UI_PID" ] && kill "$FILTER_UI_PID" 2>/dev/null || true
+    echo "[*] Stopping datacenter edition..."
+    [ -n "$GUI_PID" ] && kill "$GUI_PID" 2>/dev/null || true
     wineserver -k 2>/dev/null || true
     sleep 1
     [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
     [ -n "$RELAY_PID" ] && kill "$RELAY_PID" 2>/dev/null || true
+    [ -n "$WEBSOCKIFY_PID" ] && kill "$WEBSOCKIFY_PID" 2>/dev/null || true
+    [ -n "$X11VNC_PID" ] && kill "$X11VNC_PID" 2>/dev/null || true
+    [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null || true
     sudo ip link delete "$TAP_DEV" 2>/dev/null || true
     rm -f "$CMD_FILE" "${CMD_FILE}.proc" /tmp/rvpn_b2d /tmp/rvpn_d2b /tmp/rvpn_mac /tmp/rvpn_filters.json
+    rm -f /tmp/rvpn_vnc_password /tmp/.X${VNC_DISPLAY#:}-lock
     echo "[*] Done"
 }
 trap cleanup EXIT
 
-echo "[*] Radmin VPN for Linux"
+echo "[*] Radmin VPN Datacenter Edition"
+echo "    Virtual display + web-based GUI access"
+echo ""
 
-# Prerequisites
+# ── Prerequisites ──
 command -v wine >/dev/null || { echo "[-] Wine not found. Install wine."; exit 1; }
 command -v wineserver >/dev/null || { echo "[-] wineserver not found."; exit 1; }
 command -v python3 >/dev/null || { echo "[-] python3 not found."; exit 1; }
-# AppRun primes sudo before launching us; skip the prompt if already done.
-if [ -z "${RADMIN_SUDO_PRIMED:-}" ]; then
-    sudo -v || { echo "[-] Need sudo for TAP device."; exit 1; }
+sudo -v || { echo "[-] Need sudo for TAP device."; exit 1; }
+
+# Check for virtual display components
+MISSING_DC=()
+command -v Xvfb >/dev/null || MISSING_DC+=("xvfb")
+command -v x11vnc >/dev/null || MISSING_DC+=("x11vnc")
+command -v websockify >/dev/null || MISSING_DC+=("websockify")
+
+if [ ${#MISSING_DC[@]} -gt 0 ]; then
+    echo "[-] Missing datacenter components: ${MISSING_DC[*]}"
+    echo "    Install with:"
+    echo "      sudo apt install -y xvfb x11vnc websockify"
+    echo "    Or run: make install-datacenter-deps"
+    exit 1
 fi
 
-# 1. Kill any previous Wine session
+# Find noVNC web directory
+for p in /usr/share/novnc /usr/share/novnc/www /usr/share/websockify/novnc; do
+    if [ -d "$p" ] && [ -f "$p/vnc.html" ] || [ -f "$p/vnc_lite.html" ]; then
+        NOVNC_PATH="$p"
+        break
+    fi
+done
+if [ -z "$NOVNC_PATH" ]; then
+    echo "[-] noVNC web files not found (tried /usr/share/novnc, /usr/share/novnc/www, /usr/share/websockify/novnc)"
+    echo "    Install with: sudo apt install -y novnc"
+    exit 1
+fi
+
+# ── 1. Kill any previous session ──
 wineserver -k 2>/dev/null || true
+# Kill leftover Xvfb on our display
+if [ -f "/tmp/.X${VNC_DISPLAY#:}-lock" ]; then
+    OLD_XVFB_PID=$(cat "/tmp/.X${VNC_DISPLAY#:}-lock" 2>/dev/null | tr -d ' ')
+    [ -n "$OLD_XVFB_PID" ] && kill "$OLD_XVFB_PID" 2>/dev/null || true
+    rm -f "/tmp/.X${VNC_DISPLAY#:}-lock"
+    sleep 1
+fi
 sleep 1
 
-# 2. Install Radmin if not present
+# ── 2. Start Xvfb (virtual display) ──
+echo "[*] Starting virtual display (Xvfb $VNC_DISPLAY)..."
+Xvfb "$VNC_DISPLAY" -screen 0 1280x720x24 -ac +extension GLX +render -noreset > /tmp/radmin_xvfb.log 2>&1 &
+XVFB_PID=$!
+sleep 1
+
+# Verify Xvfb started
+if ! kill -0 "$XVFB_PID" 2>/dev/null; then
+    echo "[-] Xvfb failed to start. Check /tmp/radmin_xvfb.log"
+    exit 1
+fi
+echo "[+] Xvfb running (pid=$XVFB_PID, display=$VNC_DISPLAY)"
+
+# Set DISPLAY for all Wine processes
+export DISPLAY="$VNC_DISPLAY"
+
+# ── 3. Start x11vnc (VNC server) ──
+echo "[*] Starting VNC server on port $VNC_PORT..."
+VNC_ARGS=(-display "$VNC_DISPLAY" -forever -shared -rfbport "$VNC_PORT" -nopw)
+
+if [ -n "$VNC_PASSWORD" ]; then
+    # Write password file for x11vnc
+    x11vnc -storepasswd "$VNC_PASSWORD" /tmp/rvpn_vnc_password 2>/dev/null
+    VNC_ARGS+=(-rfbauth /tmp/rvpn_vnc_password)
+    echo "[+] VNC password set"
+else
+    echo "[!] WARNING: VNC has no password. Use --vnc-password for security."
+fi
+
+x11vnc "${VNC_ARGS[@]}" > /tmp/radmin_x11vnc.log 2>&1 &
+X11VNC_PID=$!
+sleep 1
+
+if ! kill -0 "$X11VNC_PID" 2>/dev/null; then
+    echo "[-] x11vnc failed to start. Check /tmp/radmin_x11vnc.log"
+    exit 1
+fi
+echo "[+] VNC server running (pid=$X11VNC_PID, port=$VNC_PORT)"
+
+# ── 4. Start noVNC (web-based VNC client) ──
+echo "[*] Starting noVNC on port $WEB_PORT..."
+websockify --web="$NOVNC_PATH" 0.0.0.0:"$WEB_PORT" localhost:"$VNC_PORT" > /tmp/radmin_novnc.log 2>&1 &
+WEBSOCKIFY_PID=$!
+sleep 1
+
+if ! kill -0 "$WEBSOCKIFY_PID" 2>/dev/null; then
+    echo "[-] websockify/noVNC failed to start. Check /tmp/radmin_novnc.log"
+    exit 1
+fi
+
+# Detect the right HTML file
+NOVNC_HTML="vnc.html"
+[ -f "$NOVNC_PATH/vnc_lite.html" ] && NOVNC_HTML="vnc_lite.html"
+
+echo "[+] noVNC running (pid=$WEBSOCKIFY_PID, port=$WEB_PORT)"
+echo ""
+EXTERNAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "YOUR_VPS_IP")
+echo "    ┌──────────────────────────────────────────────────────┐"
+echo "    │  Open in browser to access Radmin VPN GUI:         │"
+echo "    │  http://$EXTERNAL_IP:$WEB_PORT/$NOVNC_HTML   │"
+echo "    └──────────────────────────────────────────────────────┘"
+echo ""
+
+# ── 5. Install Radmin if not present ──
 if [ ! -f "$RADMIN/RvControlSvc.exe" ]; then
     if [ -z "$INSTALLER" ] || [ ! -f "$INSTALLER" ]; then
         echo "[-] Radmin VPN not installed and no installer found."
         echo "    Download from https://www.radmin-vpn.com/ and run:"
-        echo "    ./run.sh --installer /path/to/Radmin_VPN_*.exe"
+        echo "    ./run_datacenter.sh --installer /path/to/Radmin_VPN_*.exe"
         exit 1
     fi
     echo "[*] Installing Radmin VPN..."
@@ -117,7 +213,7 @@ if [ ! -f "$RADMIN/RvControlSvc.exe" ]; then
     echo "[+] Radmin VPN installed"
 fi
 
-# 3. Install our components
+# ── 6. Install our components ──
 echo "[*] Installing components..."
 chmod +x "$BUILD_DIR/tap_bridge" 2>/dev/null || true
 cp "$BUILD_DIR/rvpnnetmp.sys" "$WINEPREFIX/drive_c/windows/system32/drivers/"
@@ -126,7 +222,7 @@ cp "$BUILD_DIR/rvpn_launcher.exe" "$RADMIN/"
 cp "$BUILD_DIR/netsh.exe" "$WINEPREFIX/drive_c/windows/syswow64/netsh.exe"
 cp "$BUILD_DIR/netsh64.exe" "$WINEPREFIX/drive_c/windows/system32/netsh.exe"
 
-# 4. Generate or load persistent adapter MAC
+# ── 7. Generate or load persistent adapter MAC ──
 if [ -f "$MAC_FILE" ]; then
     ADAPTER_MAC=$(cat "$MAC_FILE")
 else
@@ -139,7 +235,7 @@ fi
 # Write raw 6 bytes for driver to read
 printf '%b' "$(echo "$ADAPTER_MAC" | sed 's/://g; s/../\\x&/g')" > /tmp/rvpn_mac
 
-# 5. Create TAP device
+# ── 8. Create TAP device ──
 echo "[*] Creating TAP device..."
 sudo ip link delete "$TAP_DEV" 2>/dev/null || true
 sudo ip tuntap add dev "$TAP_DEV" mode tap user "$(whoami)"
@@ -156,7 +252,7 @@ sudo sysctl -w "net.ipv4.conf.$TAP_DEV.accept_local=1" >/dev/null 2>&1 || true
 sudo ip maddr add 224.0.2.60 dev "$TAP_DEV" 2>/dev/null || true
 echo "[+] TAP $TAP_DEV created (MAC=$ADAPTER_MAC)"
 
-# 6. Start tap_bridge
+# ── 9. Start tap_bridge ──
 echo "[*] Starting tap_bridge..."
 pkill -f tap_bridge 2>/dev/null || true
 sleep 0.3
@@ -173,7 +269,7 @@ if [ ! -p /tmp/rvpn_b2d ] || [ ! -p /tmp/rvpn_d2b ]; then
 fi
 echo "[+] tap_bridge running (pid=$BRIDGE_PID)"
 
-# 7. Get TAP GUID from Wine and update registry
+# ── 10. Get TAP GUID from Wine and update registry ──
 echo "[*] Detecting TAP adapter GUID..."
 TAP_GUID=$(wine wmic path Win32_NetworkAdapter get Name,GUID 2>/dev/null \
     | grep "$TAP_DEV" | awk '{print $1}' | tr -d '\r')
@@ -203,7 +299,7 @@ echo "[+] Registry configured"
 wineserver -k 2>/dev/null || true
 sleep 1
 
-# 8. Start netsh relay
+# ── 11. Start netsh relay ──
 rm -f "$CMD_FILE" "${CMD_FILE}.proc"
 (
     while true; do
@@ -221,15 +317,15 @@ rm -f "$CMD_FILE" "${CMD_FILE}.proc"
 ) &
 RELAY_PID=$!
 
-# 9. Clear old logs
+# ── 12. Clear old logs ──
 rm -f "$LOG" "$WINEPREFIX/drive_c/radmin_driver.log"
 
-# 10. Start service
+# ── 13. Start service ──
 echo "[*] Starting Radmin VPN service..."
 cd "$RADMIN"
 wine rvpn_launcher.exe /run > /tmp/radmin_service.log 2>&1 &
 
-# 11. Wait for service ready + extract VPN IP
+# ── 14. Wait for service ready + extract VPN IP ──
 echo "[*] Waiting for service ready..."
 for _ in $(seq 1 60); do
     sleep 1
@@ -254,7 +350,7 @@ if has_ready:
     pgrep -f RvControlSvc >/dev/null || { echo "[-] Service died"; exit 1; }
 done
 
-# 12. Assign VPN IP to TAP device + set up route
+# ── 15. Assign VPN IP to TAP device + set up route ──
 sleep 2
 if [ -n "$vpn_ip" ]; then
     # Explicitly assign the VPN IP (fallback if netsh_wrapper wasn't invoked)
@@ -268,20 +364,26 @@ echo ""
 ip addr show "$TAP_DEV" 2>/dev/null | grep -E "inet |state"
 echo ""
 
-# 13. Launch GUI
-echo "[*] Starting GUI..."
+# ── 16. Launch GUI (on virtual display, accessible via noVNC) ──
+echo "[*] Starting Radmin VPN GUI on virtual display..."
 wine RvRvpnGui.exe > /tmp/radmin_gui.log 2>&1 &
 GUI_PID=$!
+echo "[+] GUI running on display $VNC_DISPLAY (pid=$GUI_PID)"
 
-# 14. Launch filter UI (GTK4)
-if [ "$NO_UI" -eq 0 ] && [ -x "$BUILD_DIR/rvpn_filter_ui" ]; then
-    echo "[*] Starting filter UI..."
-    "$BUILD_DIR/rvpn_filter_ui" > /tmp/radmin_filter_ui.log 2>&1 &
-    FILTER_UI_PID=$!
-    echo "[+] Filter UI running (pid=$FILTER_UI_PID)"
-fi
 
-echo "[+] Radmin VPN running. Close the GUI or press Ctrl+C to stop."
+echo ""
+echo "[+] ═══════════════════════════════════════════════════════════"
+echo "[+]  Radmin VPN Datacenter Edition is running"
+echo "[+] "
+echo "[+]  VPN IP:  ${vpn_ip:-unknown}"
+echo "[+]  Web GUI: http://$EXTERNAL_IP:$WEB_PORT/$NOVNC_HTML"
+echo "[+]  VNC:     localhost:$VNC_PORT"
+echo "[+] "
+echo "[+]  Configure your networks via the web GUI."
+echo "[+]  After config, the wineprefix can be exported for"
+echo "[+]  headless deployment with run_nogui.sh."
+echo "[+] ═══════════════════════════════════════════════════════════"
 echo ""
 
+# Wait for GUI to exit (or Ctrl+C)
 wait $GUI_PID || true

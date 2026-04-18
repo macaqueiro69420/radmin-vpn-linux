@@ -1,22 +1,21 @@
 #!/bin/bash
-# run.sh - Radmin VPN on Linux
-# Usage: ./run.sh [--installer /path/to/Radmin_VPN_*.exe]
+# run_nogui.sh - Radmin VPN on Linux (no original GUI, custom GUI only)
+# Starts service, waits for ready, then launches rv_net_enum.exe
+# Usage: ./run_nogui.sh [--installer /path/to/Radmin_VPN_*.exe]
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-# When launched from the AppImage, AppRun already exports WINEPREFIX and BUILD_DIR.
-# Fall back to the traditional $DIR-relative paths when running directly.
-export WINEPREFIX="${WINEPREFIX:-$DIR/wineprefix}"
+export WINEPREFIX="$DIR/wineprefix"
 RADMIN="$WINEPREFIX/drive_c/Program Files (x86)/Radmin VPN"
-BUILD_DIR="${BUILD_DIR:-$DIR/build}"
+BUILD_DIR="$DIR/build"
 TAP_DEV="radminvpn0"
 CMD_FILE="/tmp/radmin_netsh_cmd"
 LOG="$WINEPREFIX/drive_c/ProgramData/Famatech/Radmin VPN/service.log"
 MAC_FILE="$WINEPREFIX/radmin_mac"
+CUSTOM_GUI="$DIR/../rv_net_enum.exe"
 RELAY_PID=""
 BRIDGE_PID=""
 FILTER_UI_PID=""
-NO_UI=0
 
 # Parse args
 INSTALLER=""
@@ -24,32 +23,12 @@ for arg in "$@"; do
     case "$arg" in
         --installer) shift; INSTALLER="$1"; shift ;;
         --installer=*) INSTALLER="${arg#*=}" ;;
-        --no-ui) NO_UI=1 ;;
     esac
 done
 
 # Find installer if not specified
 if [ -z "$INSTALLER" ]; then
-    # Search project dir first, then BUILD_DIR (where AppImage bundles it)
     INSTALLER=$(find "$DIR" -maxdepth 1 -name "Radmin_VPN_*.exe" -print -quit 2>/dev/null || true)
-    if [ -z "$INSTALLER" ]; then
-        INSTALLER=$(find "$BUILD_DIR" -maxdepth 1 -name "Radmin_VPN_*.exe" -print -quit 2>/dev/null || true)
-    fi
-fi
-
-# Download installer at runtime if still not found
-INSTALLER_URL="${RADMIN_INSTALLER_URL:-https://download.radmin-vpn.com/download/files/Radmin_VPN_2.0.4899.9.exe}"
-if [ -z "$INSTALLER" ] || [ ! -f "$INSTALLER" ]; then
-    echo "[*] No local installer found — downloading from $INSTALLER_URL"
-    DOWNLOAD_DIR="${RADMIN_DATA_DIR:-$HOME/.local/share/radmin-vpn-linux}"
-    mkdir -p "$DOWNLOAD_DIR"
-    INSTALLER="$DOWNLOAD_DIR/Radmin_VPN_2.0.4899.9.exe"
-    if [ ! -f "$INSTALLER" ]; then
-        curl -fL -o "$INSTALLER" "$INSTALLER_URL" || { echo "[-] Download failed"; exit 1; }
-        echo "[+] Installer downloaded to $INSTALLER"
-    else
-        echo "[+] Using cached installer: $INSTALLER"
-    fi
 fi
 
 cleanup() {
@@ -65,16 +44,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[*] Radmin VPN for Linux"
+echo "[*] Radmin VPN for Linux (headless service + custom GUI)"
 
 # Prerequisites
 command -v wine >/dev/null || { echo "[-] Wine not found. Install wine."; exit 1; }
 command -v wineserver >/dev/null || { echo "[-] wineserver not found."; exit 1; }
 command -v python3 >/dev/null || { echo "[-] python3 not found."; exit 1; }
-# AppRun primes sudo before launching us; skip the prompt if already done.
-if [ -z "${RADMIN_SUDO_PRIMED:-}" ]; then
-    sudo -v || { echo "[-] Need sudo for TAP device."; exit 1; }
-fi
+sudo -v || { echo "[-] Need sudo for TAP device."; exit 1; }
 
 # 1. Kill any previous Wine session
 wineserver -k 2>/dev/null || true
@@ -85,7 +61,7 @@ if [ ! -f "$RADMIN/RvControlSvc.exe" ]; then
     if [ -z "$INSTALLER" ] || [ ! -f "$INSTALLER" ]; then
         echo "[-] Radmin VPN not installed and no installer found."
         echo "    Download from https://www.radmin-vpn.com/ and run:"
-        echo "    ./run.sh --installer /path/to/Radmin_VPN_*.exe"
+        echo "    ./run_nogui.sh --installer /path/to/Radmin_VPN_*.exe"
         exit 1
     fi
     echo "[*] Installing Radmin VPN..."
@@ -224,8 +200,8 @@ RELAY_PID=$!
 # 9. Clear old logs
 rm -f "$LOG" "$WINEPREFIX/drive_c/radmin_driver.log"
 
-# 10. Start service
-echo "[*] Starting Radmin VPN service..."
+# 10. Start service (no original GUI)
+echo "[*] Starting Radmin VPN service (headless)..."
 cd "$RADMIN"
 wine rvpn_launcher.exe /run > /tmp/radmin_service.log 2>&1 &
 
@@ -268,20 +244,30 @@ echo ""
 ip addr show "$TAP_DEV" 2>/dev/null | grep -E "inet |state"
 echo ""
 
-# 13. Launch GUI
-echo "[*] Starting GUI..."
-wine RvRvpnGui.exe > /tmp/radmin_gui.log 2>&1 &
-GUI_PID=$!
+# 13. Launch custom GUI (rv_net_enum.exe) instead of original RvRvpnGui.exe
+if [ -f "$CUSTOM_GUI" ]; then
+    echo "[*] Starting custom GUI (rv_net_enum.exe)..."
+    wine "$CUSTOM_GUI" > /tmp/radmin_custom_gui.log 2>&1 &
+    GUI_PID=$!
+    echo "[+] Custom GUI running (pid=$GUI_PID)"
+else
+    echo "[-] Custom GUI not found at $CUSTOM_GUI"
+    echo "    Build it with: i686-w64-mingw32-gcc -o rv_net_enum.exe rv_net_enum.c -mwindows -lkernel32 -luser32 -lgdi32"
+    echo "[*] Service is running headless. Press Ctrl+C to stop."
+    # Wait indefinitely for service
+    while pgrep -f RvControlSvc >/dev/null; do sleep 2; done
+    exit 0
+fi
 
 # 14. Launch filter UI (GTK4)
-if [ "$NO_UI" -eq 0 ] && [ -x "$BUILD_DIR/rvpn_filter_ui" ]; then
+if [ -x "$BUILD_DIR/rvpn_filter_ui" ]; then
     echo "[*] Starting filter UI..."
     "$BUILD_DIR/rvpn_filter_ui" > /tmp/radmin_filter_ui.log 2>&1 &
     FILTER_UI_PID=$!
     echo "[+] Filter UI running (pid=$FILTER_UI_PID)"
 fi
 
-echo "[+] Radmin VPN running. Close the GUI or press Ctrl+C to stop."
+echo "[+] Radmin VPN running with custom GUI. Close the GUI or press Ctrl+C to stop."
 echo ""
 
 wait $GUI_PID || true
