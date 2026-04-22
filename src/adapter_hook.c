@@ -46,6 +46,16 @@ static ULONG WINAPI hook_GetAdaptersAddresses(
 {
     if (!real_GetAdaptersAddresses) return ERROR_NOT_SUPPORTED;
 
+    static WCHAR staticDesc[64];
+    static WCHAR staticFN[32];
+    static int initialized = 0;
+
+    if (!initialized) {
+        wcscpy(staticDesc, RADMIN_DESC);
+        wcscpy(staticFN, RADMIN_FRIENDLY);
+        initialized = 1;
+    }
+
     ULONG ret = real_GetAdaptersAddresses(Family, Flags, Rsvd, Addrs, Size);
     if (ret != ERROR_SUCCESS || !Addrs) return ret;
 
@@ -53,10 +63,8 @@ static ULONG WINAPI hook_GetAdaptersAddresses(
         if (!cur->Description || wcscmp(cur->Description, TAP_DESC) != 0)
             continue;
 
-        WCHAR *newDesc = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, 128);
-        WCHAR *newFN   = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, 64);
-        if (newDesc) { wcscpy(newDesc, RADMIN_DESC);     cur->Description  = newDesc; }
-        if (newFN)   { wcscpy(newFN, RADMIN_FRIENDLY);   cur->FriendlyName = newFN; }
+        cur->Description = staticDesc;
+        cur->FriendlyName = staticFN;
 
         dbg("hook: renamed radminvpn0 -> Famatech Radmin VPN Ethernet Adapter");
     }

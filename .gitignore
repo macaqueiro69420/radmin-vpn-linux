@@ -1,5 +1,4 @@
 build/
-wineprefix/
 packaging/dist/
 *.sys
 *.dll
@@ -9,3 +8,4 @@ tap_bridge
 *.log
 *.o
 .*.kate-swp
+wineprefix
